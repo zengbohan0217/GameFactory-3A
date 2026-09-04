@@ -11,7 +11,7 @@ Ask first: **did the user specify the scene's 3D appearance?**
 | Situation | Prefer | Why |
 |---|---|---|
 | **Appearance not specified** — no reference image, no described look | **Downloadable, licence-checked assets.** Search the selected engine's own asset library for a usable scene or environment kit: UE5 (Fab / Marketplace, Quixel), Unity (Asset Store, packages), Godot (Asset Library), Blender (bundled assets, CC0 libraries), three.js (curated CC0 packs — see `<REPO_PATH>/agent_skills/engine_context/three_js_api.md`) | Nothing constrains the look, so a licensed, artist-made scene is more shippable than anything generated, and it imports through a documented path. Record source and licence |
-| **Appearance specified** — reference image or a described look | **Lay out the terrain/ground first, then add foreground objects** (see *Ground first, then objects* below) | WorldPlay-style reconstruction is **not yet stable enough** to be the default. Ground + placed props is controllable, editable, and reproduces a requested look reliably |
+| **Appearance specified** — reference image or a described look | **Lay out the terrain/ground first, then add foreground objects** (see *Ground first, then objects* below, and *Scene construction code chain* for the mechanised form) | WorldPlay-style reconstruction is **not yet stable enough** to be the default. Ground + placed props is controllable, editable, and reproduces a requested look reliably |
 | **Appearance specified, the space is indoor/enclosed, and the user needs high fidelity** | WorldPlay-style reconstruction | This is the one case where the reconstruction path earns its instability: an enclosed volume has no horizon or sky to break, and one reference image can carry the whole interior |
 
 Prefer downloadable assets even when the appearance is specified, if a library
@@ -115,19 +115,113 @@ Watch-outs:
 - Prefer explicit ground + object placement over trying to “fix” open-world
   reconstruction with post-filters alone
 
+## Scene construction code chain — greybox first, then detail
+
+The mechanised form of *ground first, then objects*. Use it when the layout
+matters — gameplay space, a described site, anything that will be edited or
+reviewed before it is dressed — and when you want the arrangement checked before
+any generation is paid for.
+
+Two stages, in this order:
+
+1. **Greybox.** Build terrain, place primitives, and validate. Nothing is
+   generated, so a wrong layout costs nothing to discard.
+2. **Detail.** Swap individual primitives for generated meshes and stage ground
+   textures, keeping the placement the greybox already proved.
+
+Four concerns are separate values, so any one can be changed without the others:
+
+| concern | functions in `<REPO_PATH>/operators/gen_3d_scene/funcs/terrain_code_edit.py` |
+|---|---|
+| terrain | `flat` `hills` `slope` `bowl` `mound` `canyon` `flattened` |
+| layout | `grid_spots` `ring_spots` `line_spots` `scatter_spots`, filtered by `clear_circle` `clear_of` `on_high_ground` `on_low_ground` `on_slope` |
+| sizing | `uniform_sizes` `varied_sizes` `graded_sizes` |
+| materials | `GREYBOX_MATERIALS` `swap_material` `MATERIAL_TEXTURES` |
+
+Templates are classified by **landform, not by level name**, because the terrain
+is what dictates the distribution — a settlement in a basin rings the slope, the
+same settlement on a ridge follows the high ground. In
+`<REPO_PATH>/operators/gen_3d_scene/funcs/terrain_code_template/`:
+
+| template | terrain | distribution |
+|---|---|---|
+| `plains` | level, wide | sparse scatter, no structure |
+| `hills` | rolling | split by height: towers on ridges, dwellings in hollows |
+| `basin` | dished, low centre | concentric rings up the slope |
+| `canyon` | channel between walls | linear along the floor |
+| `walled_town` | raised plateau | perimeter ring, radial inside |
+| `city` | level | dense orthogonal grid |
+
+`plains` and `city` share a terrain on purpose: they show that layout alone
+separates two scenes on identical ground. Start from the nearest landform and
+override, rather than writing a scene from nothing.
+
+Typical chain:
+
+```python
+from operators.gen_3d_scene.funcs import terrain_code_edit as te
+from operators.gen_3d_scene.funcs.terrain_code_template import basin
+
+scene = basin.build(size=70.0)          # stage 1
+problems = te.check_scene(scene)        # must be empty before going on
+te.write_scene(scene, "greybox.glb")
+
+scene = te.swap_mesh(scene, "house-r0-00", "model.glb", height=3.4)   # stage 2
+scene = te.swap_material(scene, "wall", [0.5, 0.47, 0.44])
+te.stage_scene_textures(project_dir, scene)
+```
+
+**Do not skip `check_scene`, and do not loosen a template to silence it.** It
+reports props off the terrain, props inside one another, sizes that misread
+against a 1.8 m person, and duplicate ids that would collapse two nodes on
+export. Props that are meant to touch — road segments, a wall run — share a
+`group` and are exempt; that is the intended way to express contact, not a
+larger tolerance.
+
+Geometry is measured with the writer's own `rotated_bounds` and `euler_matrix`
+from `<REPO_PATH>/models/common/glb_writer.py`. A checker that rotates or scales
+differently from the writer will pass scenes that are wrong on disk.
+
+Two behaviours worth knowing before using stage 2:
+
+- A `mesh` part is fitted into its box by **one** factor, so it fills only its
+  longest axis. Pass `height=` to `swap_mesh` whenever the mesh is not the same
+  shape as the block it replaces, or a figure dropped into a wide dais will be
+  scaled to the dais's width.
+- Terrain dipping below zero (`bowl`, `canyon`) is a landform, not a fault. The
+  tiles extend down to a shared floor so the ground stays solid.
+
+Entry points:
+
+- `python -m operators.gen_3d_scene.funcs.terrain_code_edit` — write every
+  template as a GLB and print its problem count
+- `python <REPO_PATH>/test/test_3d_scene_code.py` — 40 tests, no weights, no GPU,
+  no network
+- `python <REPO_PATH>/test/test_3d_scene_code.py --video` — record a turntable
+  per landform for review
+
+Review artifacts land in `<REPO_PATH>/test_data/outputs/_test_3d_scene_code/`,
+recorded by `<REPO_PATH>/test_data/outputs/_viewer_lib/scene_recorder.html`. That
+page is separate from `recorder.html`: a site is wide and flat, so it is framed
+against both frustum axes and viewed from above, and it does not add a grid or
+report sub-zero geometry as a fault.
+
 ## Quick checklist
 
 1. Did the user specify the appearance? **No** → search the selected engine's
    asset library for a downloadable, licence-checked scene; record source and
    licence.
-2. **Yes** → terrain/ground first, then place foreground objects. Use the
-   WorldPlay reconstruction path only for an indoor/enclosed space that needs high
-   fidelity, and say that it is the unstable route.
+2. **Yes** → terrain/ground first, then place foreground objects. For a layout
+   that matters, use the *Scene construction code chain*: greybox and
+   `check_scene` before anything is generated. Use the WorldPlay reconstruction
+   path only for an indoor/enclosed space that needs high fidelity, and say that
+   it is the unstable route.
 3. Classify closed vs open (from task text / reference) and apply the matching
    geometry strategy.
 4. Write artifacts to the paths `<REPO_PATH>/pipeline/common/paths.py` defines for `3d_scene`.
 5. Visually check continuity (closed) or placement / scale on ground (open)
-   before accepting the asset.
+   before accepting the asset. For a code-built scene, `check_scene` must be
+   empty and the recorded turntable must show the landform it claims.
 6. If the user reports inconsistent scene quality, summarise the reconstruction
    limitation and move to ground-first composition or a library scene rather than
    regenerating repeatedly.
