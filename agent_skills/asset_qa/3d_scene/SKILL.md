@@ -133,50 +133,104 @@ Four concerns are separate values, so any one can be changed without the others:
 
 | concern | functions in `<REPO_PATH>/operators/gen_3d_scene/funcs/terrain_code_edit.py` |
 |---|---|
-| terrain | `flat` `hills` `slope` `bowl` `mound` `canyon` `flattened` |
-| layout | `grid_spots` `ring_spots` `line_spots` `scatter_spots`, filtered by `clear_circle` `clear_of` `on_high_ground` `on_low_ground` `on_slope` |
-| sizing | `uniform_sizes` `varied_sizes` `graded_sizes` |
+| terrain | `flat` `hills` `slope` `bowl` `mound` `canyon`, reshaped by `flattened` `levelled_at` `graded` `carved` |
+| layout | `grid_spots` `ring_spots` `line_spots` `scatter_spots` `clustered_spots` `winding_spots` `arc_spots` `blocks_spots` `channel_spots`, filtered by `clear_circle` `clear_of` `clear_of_ways` `in_height_band` `on_high_ground` `on_low_ground` `on_slope` `fits` |
+| sizing | `uniform_sizes` `varied_sizes` `graded_sizes` `tiered_heights` `stepped_sizes` |
 | materials | `GREYBOX_MATERIALS` `swap_material` `MATERIAL_TEXTURES` |
 
-Templates are classified by **landform, not by level name**, because the terrain
-is what dictates the distribution — a settlement in a basin rings the slope, the
-same settlement on a ridge follows the high ground. In
-`<REPO_PATH>/operators/gen_3d_scene/funcs/terrain_code_template/`:
+Relief is written as one welded `heightfield`, not a box per tile: a grid of
+boxes is a staircase with a vertical wall at every tile edge, which is what
+makes a slope read as blocky. Ground shapes are driven by `fractal_noise`
+rather than by sine waves, since crossed sines put every crest on a regular
+lattice and the layout filters built on them then fall into rows.
 
-| template | terrain | distribution |
+### The Two Stages Of A Template
+
+`<REPO_PATH>/operators/gen_3d_scene/funcs/terrain_code_template/` holds two
+files, split by question rather than by scene:
+
+| file | question | returns |
 |---|---|---|
-| `plains` | level, wide | sparse scatter, no structure |
-| `hills` | rolling | split by height: towers on ridges, dwellings in hollows |
-| `basin` | dished, low centre | concentric rings up the slope |
-| `canyon` | channel between walls | linear along the floor |
-| `walled_town` | raised plateau | perimeter ring, radial inside |
-| `city` | level | dense orthogonal grid |
+| `landforms.py` | what is the ground | a `Ground`: terrain plus the measurements taken from it |
+| `foreground.py` | what stands on it | `(terrain, props)` |
 
-`plains` and `city` share a terrain on purpose: they show that layout alone
-separates two scenes on identical ground. Start from the nearest landform and
-override, rather than writing a scene from nothing.
+The ground reports what the foreground needs — where a basin actually bottoms
+out, what level a street network was graded to — so each measurement is
+derived once, where it is known. A foreground that re-derived them would give
+a second answer to the same question.
+
+The foreground returns terrain as well because some of them cut the ground
+they stand on: a pad under a hut, a level track. **Every cut has to happen
+before any prop is measured**, or a prop is placed against ground that later
+moves under it.
+
+Landforms are classified by **landform, not by level name**, because the
+terrain dictates the distribution — a settlement in a basin gathers on the
+terraces, the same settlement on a ridge follows the high ground.
+
+| landform | ground | distribution |
+|---|---|---|
+| `plains` | level with a ripple | sparse scatter, no structure |
+| `hills` | rolling noise | split by height: towers on ridges, dwellings in hollows |
+| `basin` | dished, off-centre low point | hamlets on the terraces, shore, track to water |
+| `canyon` | meandering channel | chain along the floor, debris on the walls |
+| `walled_town` | plateau with rough flanks | rampart on the rim, radial spokes inside |
+| `city` | graded streets, carved river | paving, stacked interchange, crowded quarters |
+
+Start from the nearest landform and override, rather than writing a scene from
+nothing.
 
 Typical chain:
 
 ```python
 from operators.gen_3d_scene.funcs import terrain_code_edit as te
-from operators.gen_3d_scene.funcs.terrain_code_template import basin
+from operators.gen_3d_scene.funcs.terrain_code_template import (
+    build_scene, foreground, landforms,
+)
 
-scene = basin.build(size=70.0)          # stage 1
-problems = te.check_scene(scene)        # must be empty before going on
+scene = build_scene("basin", size=70.0)     # stage 1: the pair
+problems = te.check_scene(scene)            # must be empty before going on
 te.write_scene(scene, "greybox.glb")
 
-scene = te.swap_mesh(scene, "house-r0-00", "model.glb", height=3.4)   # stage 2
+scene = te.swap_mesh(scene, "house-00", "model.glb", height=3.4)   # stage 2
 scene = te.swap_material(scene, "wall", [0.5, 0.47, 0.44])
 te.stage_scene_textures(project_dir, scene)
 ```
 
+To keep a landform and re-roll what stands on it, or put one settlement on a
+different shape of ground, drive the two stages directly:
+
+```python
+ground = landforms.hills(size=90.0, relief=5.0)
+terrain, props = foreground.plains(ground)      # the pairing is a default
+scene = te.Scene("mixed", terrain, props)
+```
+
+### Placement Rules Worth Knowing
+
+- `ground_under` rests a prop on the **lowest ground under its whole
+  footprint**, not the height at its centre. A wide base sampled only at the
+  centre leaves a corner hanging in the air on any slope.
+- `fits` measures the **candidate's own turned footprint**; `clear_of` is
+  given a bare position and cannot see how wide a building is. Use `fits` when
+  choosing size and position together.
+- `pinned` holds a run at one level while the ground falls away — a bridge or
+  a flyover deck. `sloped` spreads a climb along a run, for a ramp between
+  two levels. A ramp built from `pinned` would be a step.
+- Paving is a run of short tiles from `path_tiles` / `paved`, not one long
+  box, so it follows a bend and follows the ground. **Grade the ground under
+  a whole network to one level** (`graded`) or neighbouring slabs each rest on
+  their own patch and step against each other — a slab can sit further above
+  its neighbour than the slab is thick, which is a pothole every few metres.
+- Order matters when reshaping ground: grade the streets, **then** carve the
+  river. In the other order the streets dam the channel at every crossing.
+
 **Do not skip `check_scene`, and do not loosen a template to silence it.** It
 reports props off the terrain, props inside one another, sizes that misread
 against a 1.8 m person, and duplicate ids that would collapse two nodes on
-export. Props that are meant to touch — road segments, a wall run — share a
-`group` and are exempt; that is the intended way to express contact, not a
-larger tolerance.
+export. Props that are meant to touch — road segments, a wall run, reeds in
+the shallows — share a `group` and are exempt; that is the intended way to
+express contact, not a larger tolerance.
 
 Geometry is measured with the writer's own `rotated_bounds` and `euler_matrix`
 from `<REPO_PATH>/models/common/glb_writer.py`. A checker that rotates or scales

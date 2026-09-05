@@ -24,7 +24,7 @@ Construction — a scene written as code, with no images at all:
 | module                     | step                                               |
 |----------------------------|----------------------------------------------------|
 | `terrain_code_edit.py`     | terrain, layout, sizing and materials as values     |
-| `terrain_code_template/`   | one module per landform, each returning a `Scene`   |
+| `terrain_code_template/`   | `landforms.py` the ground, `foreground.py` what is on it |
 
 The greybox is built and checked first, then individual props are swapped for
 generated meshes and textures are staged. `scene_assets.py` and
